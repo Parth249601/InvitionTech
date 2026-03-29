@@ -1,3 +1,12 @@
+---
+title: ForexGuard
+emoji: 🛡️
+colorFrom: blue
+colorTo: red
+sdk: docker
+pinned: false
+---
+
 <p align="center">
   <h1 align="center">ForexGuard</h1>
   <p align="center">
