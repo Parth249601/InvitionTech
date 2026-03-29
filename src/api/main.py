@@ -24,7 +24,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
@@ -36,6 +36,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.features.feature_extractor import FeatureExtractor  # noqa: E402
 from src.models.train_models import DenseAutoencoder          # noqa: E402
+from src.llm.risk_summarizer import RiskSummarizer, _risk_level  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Warm-up: minimum events before a user can be flagged as anomalous.
@@ -89,6 +90,10 @@ class ScoreOut(BaseModel):
     is_anomalous: bool
     risk_score: float
     top_contributors: list[ContributorOut]
+    risk_summary: Optional[str] = Field(
+        default=None,
+        description="LLM-generated human-readable risk narrative (only for anomalous users)"
+    )
     timestamp: str
     event_id: str
     events_processed: int = Field(
@@ -111,6 +116,7 @@ class AppState:
     threshold: float
     feature_names: list[str]
     device: torch.device
+    summarizer: RiskSummarizer
     total_scored: int = 0
     total_anomalies: int = 0
 
@@ -159,6 +165,10 @@ async def lifespan(app: FastAPI):
     print(f"  [ok] Threshold loaded: {state.threshold:.4f}")
     print(f"  [ok] Warm-up: {MIN_EVENTS_FOR_SCORING} events per user before scoring")
 
+    # 6. LLM Risk Summarizer
+    state.summarizer = RiskSummarizer()
+    print(f"  [ok] RiskSummarizer loaded (backend={state.summarizer.backend})")
+
     state.total_scored = 0
     state.total_anomalies = 0
 
@@ -201,7 +211,8 @@ async def root():
       <p>Real-time anomaly detection engine for forex trader behavior.</p>
       <h3>Endpoints</h3>
       <ul>
-        <li><code>POST /score</code> &mdash; Score a single event (<a href="/docs#/default/score_event_score_post">try it</a>)</li>
+        <li><code>POST /score</code> &mdash; Score a single event with LLM risk summary (<a href="/docs#/default/score_event_score_post">try it</a>)</li>
+        <li><code>GET /alert/{user_id}/summary</code> &mdash; On-demand LLM risk summary for a tracked user</li>
         <li><code>GET /health</code> &mdash; <a href="/health">Service health & stats</a></li>
         <li><code>GET /docs</code> &mdash; <a href="/docs">Interactive API docs (Swagger)</a></li>
       </ul>
@@ -272,6 +283,7 @@ async def score_event(event: EventIn):
         is_anomalous = risk_score >= state.threshold
 
     top_contributors: list[ContributorOut] = []
+    risk_summary: Optional[str] = None
     if is_anomalous:
         top3_idx = np.argsort(per_feature_error)[-3:][::-1]
         top_contributors = [
@@ -281,6 +293,15 @@ async def score_event(event: EventIn):
             )
             for j in top3_idx
         ]
+        # -- 6. LLM risk summary for anomalous users -----------------------
+        user_features = state.extractor.get_user_features(user_id)
+        user_features.pop("user_id", None)
+        risk_summary = await state.summarizer.generate(
+            user_id=user_id,
+            risk_score=risk_score,
+            top_contributors=[c.model_dump() for c in top_contributors],
+            user_features=user_features,
+        )
 
     # -- Bookkeeping --------------------------------------------------------
     state.total_scored += 1
@@ -292,8 +313,93 @@ async def score_event(event: EventIn):
         is_anomalous=is_anomalous,
         risk_score=round(risk_score, 6),
         top_contributors=top_contributors,
+        risk_summary=risk_summary,
         timestamp=event.timestamp,
         event_id=event.event_id,
         events_processed=events_processed,
         warming_up=warming_up,
+    )
+
+
+# ============================================================================
+# On-demand alert summary endpoint
+# ============================================================================
+
+class AlertSummaryOut(BaseModel):
+    """Response from the /alert/{user_id}/summary endpoint."""
+    user_id: str
+    risk_score: float
+    risk_level: str
+    top_contributors: list[ContributorOut]
+    risk_summary: str
+    llm_backend: str = Field(description="Backend used: 'gemini' or 'template'")
+    events_processed: int
+
+
+@app.get("/alert/{user_id}/summary", response_model=AlertSummaryOut)
+async def alert_summary(user_id: str):
+    """
+    Generate an on-demand LLM risk summary for a tracked user.
+
+    The user must have been previously scored via POST /score (at least
+    MIN_EVENTS_FOR_SCORING events). Returns a full risk narrative with
+    top contributing features and recommended compliance actions.
+    """
+    if user_id not in state.extractor.user_ids:
+        raise HTTPException(status_code=404, detail=f"User '{user_id}' not found. Send events via POST /score first.")
+
+    user_state = state.extractor._get_or_create(user_id)
+    if user_state.total_events < MIN_EVENTS_FOR_SCORING:
+        raise HTTPException(
+            status_code=400,
+            detail=f"User '{user_id}' has only {user_state.total_events} events "
+                   f"(need {MIN_EVENTS_FOR_SCORING}+ for scoring)."
+        )
+
+    # Compute features and score
+    user_features = state.extractor.get_user_features(user_id)
+    user_features.pop("user_id", None)
+
+    feature_vector = np.array(
+        [user_features.get(f, 0.0) for f in state.feature_names], dtype=np.float64
+    )
+    feature_vector = np.nan_to_num(feature_vector, nan=0.0, posinf=0.0, neginf=0.0)
+    X_scaled = state.scaler.transform(feature_vector.reshape(1, -1))
+
+    with torch.no_grad():
+        X_tensor = torch.FloatTensor(X_scaled).to(state.device)
+        reconstructed = state.model(X_tensor).cpu().numpy()
+
+    per_feature_error = (X_scaled[0] - reconstructed[0]) ** 2
+    risk_score = float(per_feature_error.mean())
+
+    # Top contributors
+    top5_idx = np.argsort(per_feature_error)[-5:][::-1]
+    top_contributors = [
+        ContributorOut(
+            feature=state.feature_names[j],
+            error=round(float(per_feature_error[j]), 4),
+        )
+        for j in top5_idx
+    ]
+
+    # Risk level
+    risk_level = _risk_level(risk_score)
+
+    # Generate summary
+    summary = await state.summarizer.generate(
+        user_id=user_id,
+        risk_score=risk_score,
+        top_contributors=[c.model_dump() for c in top_contributors],
+        user_features=user_features,
+    )
+
+    return AlertSummaryOut(
+        user_id=user_id,
+        risk_score=round(risk_score, 6),
+        risk_level=risk_level,
+        top_contributors=top_contributors,
+        risk_summary=summary,
+        llm_backend=state.summarizer.backend,
+        events_processed=user_state.total_events,
     )

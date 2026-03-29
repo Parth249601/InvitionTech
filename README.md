@@ -7,6 +7,7 @@
     <a href="#quickstart">Quickstart</a> &bull;
     <a href="#architecture-overview">Architecture</a> &bull;
     <a href="#ml-approach">ML Approach</a> &bull;
+    <a href="#llm-risk-summaries">LLM Summaries</a> &bull;
     <a href="#api-reference">API Reference</a> &bull;
     <a href="#deployment">Deployment</a> &bull;
     <a href="#evaluation-results">Results</a>
@@ -29,6 +30,7 @@ A production-grade, real-time anomaly detection prototype that identifies suspic
   - [Autoencoder Architecture](#autoencoder-architecture)
   - [Explainability via Reconstruction Error](#explainability-via-reconstruction-error)
 - [Feature Engineering](#feature-engineering)
+- [LLM-Generated Risk Summaries](#llm-risk-summaries)
 - [Anomaly Patterns Detected](#anomaly-patterns-detected)
 - [Engineering Highlights](#engineering-highlights)
 - [Quickstart](#quickstart)
@@ -148,6 +150,56 @@ This tells a compliance analyst *exactly which behavioral dimension is abnormal*
 | `total_event_count` | Overall activity level |
 | `deposit_to_trade_ratio` | Deposit-withdrawal abuse pattern |
 | `kyc_to_withdrawal_hours` | Rapid KYC change before withdrawal |
+
+---
+
+## LLM-Generated Risk Summaries
+
+ForexGuard generates **human-readable risk narratives** for every anomalous user, transforming raw feature data into actionable compliance alerts. This is powered by a dual-backend system:
+
+| Backend | When Used | Description |
+|---------|-----------|-------------|
+| **Google Gemini** | `GEMINI_API_KEY` env var is set | Calls Gemini 2.0 Flash to produce context-aware, natural-language risk narratives with fraud pattern analysis and recommended actions |
+| **Template Engine** | No API key (default) | Deterministic rule-based summarizer that maps anomalous features to known forex fraud patterns and generates structured narratives -- works offline with zero config |
+
+### How It Works
+
+1. When a user is flagged as anomalous, the top contributing features and the full 50-feature behavioral profile are passed to the summarizer
+2. The LLM (or template engine) maps features to known fraud patterns (account takeover, money laundering, latency arbitrage, bonus abuse, etc.)
+3. A structured narrative is returned with: risk level, key findings, and recommended compliance action
+
+### Example Output
+
+```
+**CRITICAL RISK ALERT** for user `user_0042` — Risk Score: 41.98 (threshold: 0.726).
+
+**Key Findings:**
+1. Activity Hour Entropy shows highly irregular activity distribution across hours
+   (value: 1210.51 bits), indicating non-human activity pattern suggesting automated
+   or multi-timezone access.
+2. After-Hours Activity Ratio (1-5 AM) shows concentrated activity during 1-5 AM hours
+   (value: 44.00%), indicating potential account takeover or unauthorized access from a
+   different timezone.
+3. Average Margin Usage shows unusually high margin utilization (value: 188.66%),
+   indicating aggressive risk-taking possibly linked to account exploitation.
+
+**Recommended Action:** Immediately freeze the account and escalate to the fraud
+investigation team. Preserve all session logs and transaction records for forensic review.
+```
+
+### Enabling Gemini LLM Backend
+
+```bash
+# Set the API key (get one free at https://aistudio.google.com/apikey)
+export GEMINI_API_KEY="your-key-here"
+
+# Start the API -- LLM summaries are now generated via Gemini
+python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000
+```
+
+### Dedicated Summary Endpoint
+
+Use `GET /alert/{user_id}/summary` to generate an on-demand risk summary for any tracked user with 10+ events, returning the full narrative with top-5 contributing features and risk level classification.
 
 ---
 
@@ -316,6 +368,7 @@ Ingests one raw event (portal or trading), updates the user's rolling state, run
     {"feature": "unusual_hour_ratio", "error": 296.86},
     {"feature": "avg_margin_used", "error": 188.66}
   ],
+  "risk_summary": "**CRITICAL RISK ALERT** for user `user_0500` — Risk Score: 41.98 ...",
   "timestamp": "2025-01-15 03:22:11",
   "event_id": "PE_000001",
   "events_processed": 15,
@@ -330,8 +383,30 @@ Ingests one raw event (portal or trading), updates the user's rolling state, run
 | `is_anomalous` | `bool` | `true` if `risk_score` exceeds the P85 threshold (0.726) |
 | `risk_score` | `float` | Mean reconstruction error from the autoencoder (higher = more suspicious) |
 | `top_contributors` | `list` | Top 3 features with highest per-feature reconstruction error |
+| `risk_summary` | `string\|null` | LLM-generated risk narrative (only for anomalous users; `null` otherwise) |
 | `events_processed` | `int` | Total events ingested for this user since API startup |
 | `warming_up` | `bool` | `true` if user has fewer than 10 events (not yet scored) |
+
+### `GET /alert/{user_id}/summary` -- On-Demand Risk Summary
+
+Generates a full LLM risk narrative for any tracked user with 10+ events. Returns top-5 contributing features (instead of top-3 in `/score`), risk level classification, and recommended compliance action.
+
+```json
+{
+  "user_id": "user_0500",
+  "risk_score": 41.975163,
+  "risk_level": "CRITICAL",
+  "top_contributors": [
+    {"feature": "activity_hour_entropy", "error": 1210.51},
+    {"feature": "unusual_hour_ratio", "error": 296.86},
+    {"feature": "avg_margin_used", "error": 188.66},
+    {"feature": "page_view_velocity", "error": 142.33},
+    {"feature": "unique_ip_count", "error": 98.12}
+  ],
+  "risk_summary": "**CRITICAL RISK ALERT** for user `user_0500` ...",
+  "llm_backend": "gemini",
+  "events_processed": 15
+}
 
 ---
 
@@ -387,6 +462,8 @@ forexguard/
       feature_extractor.py          # Stateful OOP feature extractor (deque-backed)
     models/
       train_models.py               # Isolation Forest + Autoencoder training & evaluation
+    llm/
+      risk_summarizer.py            # LLM-powered risk narrative generator (Gemini + template)
     api/
       main.py                       # FastAPI real-time scoring service
     streaming/
@@ -443,7 +520,7 @@ forexguard/
 | **Synthetic data** | Required by the assessment. Anomaly injection is based on real forex fraud patterns, but normal behavior distribution is simplified. | Replace with real production event streams |
 | **10-event warm-up** | Practical cold-start mitigation. | Warm up state from a historical event log at startup rather than waiting for live events |
 | **Single-process API** | Uvicorn with one worker. | Multiple workers behind a load balancer with shared state in Redis |
-| **No LLM risk summaries** | Not implemented in current version. | Integrate an LLM to generate natural-language risk narratives from `top_contributors` for compliance analysts |
+| **LLM with template fallback** | Gemini LLM requires an API key; template engine works offline as default. Both produce structured compliance narratives. | Integrate with enterprise LLM (Azure OpenAI, on-prem) for regulated environments |
 
 ---
 
@@ -457,6 +534,7 @@ forexguard/
 | **API** | FastAPI, Pydantic v2, Uvicorn |
 | **Streaming** | asyncio, httpx (simulated; Kafka-ready architecture) |
 | **Infrastructure** | Docker, docker-compose |
+| **LLM** | Google Gemini 2.0 Flash (optional), rule-based template engine (default) |
 | **Serialization** | joblib (sklearn models), torch.save (PyTorch) |
 
 ---
@@ -464,7 +542,7 @@ forexguard/
 ## Future Work
 
 - **Kafka/Redpanda Integration** -- Replace HTTP simulation with a real message broker for production-grade streaming
-- **LLM-Generated Risk Summaries** -- Feed `top_contributors` into an LLM to generate natural-language compliance alerts (e.g., *"User user_0042 exhibits bot-like navigation patterns with 103x normal page velocity and login activity concentrated in the 1-5 AM window"*)
+- **Enterprise LLM Integration** -- Replace Gemini with Azure OpenAI or on-prem LLM for regulated environments with data residency requirements
 - **Dashboard UI** -- Real-time Grafana or custom React dashboard showing anomaly trends, user risk heatmaps, and alert history
 - **Redis State Backend** -- Replace in-process `dict` with Redis for horizontal scaling and state persistence
 - **Model Retraining Pipeline** -- Scheduled retraining on fresh data with MLflow experiment tracking
