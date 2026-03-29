@@ -20,10 +20,10 @@ from pathlib import Path; \
 done = Path('models/autoencoder.pth').exists(); \
 print('Model artifacts found, skipping training.' if done else 'No artifacts -- will train on first run.')"
 
-EXPOSE 8000
+EXPOSE 7860
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD python -c "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()"
+    CMD python -c "import httpx; httpx.get('http://localhost:7860/health').raise_for_status()"
 
-CMD ["python", "-m", "uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "7860"]
