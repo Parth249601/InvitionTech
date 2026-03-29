@@ -22,9 +22,17 @@ pinned: false
 
 ---
 
-A production-grade, real-time anomaly detection prototype that identifies suspicious user activity across **client portal** and **trading terminal** events in a forex brokerage environment. The system ingests raw event streams, maintains per-user behavioral state via rolling windows, scores each event through dual ML models, and returns **explainable risk alerts** for compliance teams -- all in under 3ms per event.
+A production-grade, real-time anomaly detection prototype that identifies suspicious user activity across **client portal** and **trading terminal** events in a forex brokerage environment. The system ingests raw event streams, maintains per-user behavioral state via rolling windows, scores each event through dual ML models, and returns **explainable risk alerts** with **LLM-generated risk summaries** for compliance teams -- all in under 3ms per event.
 
 > Built as the AI/ML Internship Assessment for **Invition Technologies**.
+
+### Live Demo & Repository
+
+| | Link |
+|---|------|
+| **Hosted Demo** | https://bansalparth-forexguard.hf.space |
+| **GitHub Repository** | https://github.com/Parth249601/InvitionTech |
+| **Interactive API Docs** | https://bansalparth-forexguard.hf.space/docs |
 
 ---
 
