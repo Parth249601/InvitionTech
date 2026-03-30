@@ -5,7 +5,7 @@ services:
     build: .
     container_name: forexguard-api
     ports:
-      - "8000:8000"
+      - "8000:7860"
     volumes:
       # Mount model artifacts so they persist across rebuilds
       - ./models:/app/models
@@ -14,7 +14,7 @@ services:
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()"]
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:7860/health').raise_for_status()"]
       interval: 30s
       timeout: 5s
       retries: 3

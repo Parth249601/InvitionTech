@@ -285,7 +285,7 @@ features = extractor.process_event(event, compute=True)  # returns 50-feature di
 ### Installation
 
 ```bash
-git clone https://github.com/<your-username>/forexguard.git
+git clone https://github.com/Parth249601/InvitionTech.git
 cd forexguard
 pip install -r requirements.txt
 ```
